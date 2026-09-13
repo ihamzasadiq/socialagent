@@ -1,0 +1,23 @@
+{
+  "handle": null,
+  "logo": null,
+  "text_model": "deepseek/deepseek-v4-flash",
+  "vision_model": "google/gemini-3.1-flash-lite",
+  "image_model": "google/gemini-3.1-flash-image",
+  "reference_model": "google/gemini-3.1-flash-image",
+  "fallback_models": [
+    "bytedance-seed/seedream-5-0-lite",
+    "black-forest-labs/flux.2-klein-4b",
+    "google/gemini-2.5-flash-image"
+  ],
+  "palette": {
+    "primary": "#111111",
+    "accent": "#FF6B35",
+    "text": "#FFFFFF",
+    "card": "#000000"
+  },
+  "default_ratio": "4:5",
+  "default_layout": "bold-bottom",
+  "default_style": "modern",
+  "output_dir": "output"
+}

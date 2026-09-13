@@ -1,22 +1,23 @@
-# backend/ingestion — Dev A
+# backend/ingestion
 
-Turns a source URL into something `templates.generate_posts` can reference.
+Turns a source URL into the context block that `templates.generate_posts`
+feeds to the model.
 
-- `fetch.py`
-  - `parse_source(raw_url) -> ParsedSource` — pure, offline, mirrors the
-    frontend's client-side title derivation exactly. Raises `ValueError` on
-    genuinely unparseable input.
-  - `fetch_source(raw_url, timeout=2.5) -> ParsedSource` — real `httpx` GET +
-    `<title>` scrape, falling back to `parse_source()` on any network error
-    or timeout. This is what `orchestrator/routes.py` calls for every source
-    in a `/api/generate` request.
+- `parse_source(raw_url) -> FetchedSource` — pure, offline URL validation
+  plus a slug-derived title. Raises `ValueError` on genuinely unparseable
+  input (routes turn that into a 400).
+- `fetch_source(raw_url, deep=False) -> FetchedSource` — real work:
+  - fetches with a browser User-Agent, retrying with a crawler User-Agent
+    when the page yields almost no text and no images;
+  - extracts markdown text with trafilatura (falling back to a BeautifulSoup
+    text dump) and caps it at 12k chars;
+  - collects up to 6 candidate images, skipping tracking pixels/spacers/SVGs;
+  - when `deep=True`, asks an OpenRouter vision model to describe the page
+    and its images (this is the slow step, up to ~2 minutes);
+  - renders everything into a single markdown `context` string.
+- Network failures never raise: the source comes back with `status="error"`
+  and its slug-derived title, so one dead link can't break generation.
 
-## TODO — where to take this next
-
-- Real content extraction: page body text, meta description, OpenGraph tags —
-  not just `<title>`. `generate_posts` should get real context to work with,
-  not just a slug-derived title.
-- Handle PDFs and other non-HTML content types.
-- Handle paywalled/JS-rendered pages (would need something heavier than a
-  plain `httpx.get`, e.g. a headless browser — probably out of scope for the
-  hackathon, but worth flagging).
+Configuration comes from `backend/.env` (`OPENROUTER_API_KEY`,
+`OPENROUTER_VLM_MODEL` / `OPENROUTER_MODEL` overrides). Without an API key,
+deep analysis is skipped with a note appended to the context.

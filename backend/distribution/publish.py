@@ -1,29 +1,31 @@
-"""Dev B owns this module: actually posting to each platform.
+"""Route an approved post to the right provider.
 
-STUB — always succeeds, no real platform API call is made yet.
+Only LinkedIn is wired up today. Instagram has a provider-shaped hole here:
+implement ``Provider``, register it below, and ``/api/approve`` starts working
+for it without any other change.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from config import settings
+from distribution.base import Provider, ProviderNotSupported
+from distribution.linkedin import LinkedInProvider
+from orchestrator.session import LinkedInConnection
 
 
-@dataclass
-class PublishResult:
-    status: str  # always "posted" today
-    posted_at: str  # ISO 8601
+def provider_for(platform: str) -> Provider:
+    if platform == "linkedin":
+        return LinkedInProvider(settings)
+    raise ProviderNotSupported(f"{platform} publishing is not wired up yet")
 
 
-def publish_post(post_id: str, platform: str, text: str) -> PublishResult:
-    """STUB: fakes a successful publish, no real platform API call.
-
-    TODO(Dev B): route by `platform` to the real integration — Twitter API
-    v2, LinkedIn API, Discord webhook — posting `text`, and let failures
-    (auth expired, rate limited, platform down) propagate as exceptions so
-    orchestrator/routes.py can turn them into a real error response instead
-    of the fake-always-succeeds behavior here. Will need distribution/oauth.py
-    filled in first for anything that requires user authorization.
-    """
-    del post_id, platform, text  # unused until the real integration lands
-    return PublishResult(status="posted", posted_at=datetime.now(timezone.utc).isoformat())
+async def publish_post(
+    platform: str,
+    connection: LinkedInConnection,
+    text: str,
+    image_path: str | None = None,
+) -> str:
+    provider = provider_for(platform)
+    return await provider.publish(
+        connection.access_token, connection.external_id, text, image_path
+    )

@@ -1,26 +1,23 @@
-# backend/templates — Dev A
+# backend/templates
 
-Turns a template + sources into per-platform draft text.
+Turns source context + a template into per-platform drafts.
 
-- `fixtures.py` — `FIXTURE_DRAFTS[template_id][platform_id]`, mock copy ported
-  verbatim from the original frontend prototype. Two variants per pair.
-- `generate.py`
-  - `generate_posts(template_id, source_titles, custom_template=None, prompt=None) -> list[GeneratedDraft]`
-    — one draft per platform, currently a fixture lookup.
-  - `regenerate_variant(template_id, platform, current_variant_index, custom_template=None) -> (text, new_index)`
-    — cycles to the next mock variant.
-  - When `template_id == "custom"` and `custom_template` is non-empty, both
-    functions embed the literal custom template text in the output instead
-    of using fixtures — this is the one thing already wired for real.
+- `generate_posts(template_id, source_contexts, custom_template=None, prompt=None, platforms=None, reference_data_url=None)`
+  — one OpenRouter call per platform. Each call returns structured JSON:
+  `headline`, `subhead`, `post`, `hashtags`, `alt_text`, `image_prompt`.
+  When `reference_data_url` is set the call becomes multimodal (vision model),
+  `DESIGN_SYSTEM` is appended with instructions to copy the same style as the
+  image referenced, and the parsed `design` tokens ride along on each draft
+  for the image step.
+- `regenerate_post(original, source_contexts, template_id, ...)` — same call
+  with a "write a different variant" instruction at a higher temperature.
+- `PLATFORM_GUIDES` holds the per-platform system guidance; `TEMPLATE_GUIDES`
+  holds the Funding / Acquisition / Launch / Custom shapes.
+- `ACTIVE_PLATFORMS` is the single switch for which platforms get generated.
+  It is `["linkedin"]` today — add `"instagram"` (already in
+  `PLATFORM_GUIDES`) once Instagram publishing exists.
+- `fixtures.py` keeps the original prototype copy. It is only used when no
+  `OPENROUTER_API_KEY` is configured, so the UI stays demoable offline.
 
-## TODO — where to take this next
-
-- Replace the fixture lookup in `generate_posts`/`_variants_for` with real
-  per-platform LLM calls. `source_titles` and `prompt` are already threaded
-  through the function signature for exactly this — you shouldn't need to
-  touch `orchestrator/routes.py` to wire a real call in.
-- Once `ingestion.fetch_source` returns real page content (not just a
-  title), use that as generation context instead of just titles.
-- Per-platform prompts/system messages (Twitter needs brevity, LinkedIn
-  wants a narrative arc, Discord wants a casual community voice) — the
-  fixture copy already demonstrates the tone difference to aim for.
+The LLM transport itself lives in `imaging/core.py` (`complete_json`), which
+holds the OpenRouter request/retry/JSON-parsing logic.

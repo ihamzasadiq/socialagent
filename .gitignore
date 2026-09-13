@@ -1,3 +1,13 @@
+# env / secrets / keys — never commit these
+.env
+backend/.env
+*.pem
+*.key
+*.pub
+~/.oci/
+oci_config
+*.oci
+
 # frontend
 frontend/node_modules
 frontend/dist
@@ -8,7 +18,8 @@ backend/.venv
 backend/**/__pycache__
 **/__pycache__
 *.pyc
-backend/.env
+backend/media/
+*.db
 
 # misc
 .DS_Store

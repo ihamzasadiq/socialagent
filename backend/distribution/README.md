@@ -1,26 +1,22 @@
-# backend/distribution — Dev B
+# backend/distribution
 
-Everything about actually getting a post onto a platform.
+OAuth and publishing. Ported from the standalone oauth service, minus the
+database, scheduler, token encryption and the X/Instagram providers — the
+session is the only token store, and only LinkedIn is wired.
 
-- `publish.py` — `publish_post(post_id, platform) -> PublishResult`. STUB:
-  always fakes success, no real platform API call.
-- `images.py` — `generate_image(post_id, platform) -> str`. STUB: returns a
-  `placehold.co` URL. Not called from `orchestrator/` yet — the wire
-  contract (`/shared/types.ts`) has no image field on `Post` today.
-- `oauth.py` — empty, TODO-only. Nothing calls it yet since `publish_post`
-  doesn't need real credentials until it stops being a stub.
+- `base.py` — provider plumbing: `Provider` ABC (`auth_url`, `exchange_code`,
+  `fetch_identity`, `publish`), `TokenBundle`, `Identity`, and the
+  `request`/`request_json` helpers with LinkedIn-friendly error summaries.
+- `linkedin.py` — the real provider:
+  - authorization-code flow against `linkedin.com/oauth/v2` with the
+    `openid profile w_member_social` scopes;
+  - `fetch_identity` via `/v2/userinfo`;
+  - `publish(text, image_path)` posts to `/rest/posts` and, when an image is
+    given, initializes the Images API upload and PUTs the **local JPEG bytes**
+    straight from `backend/media/` — no public media URL needed.
+- `publish.py` — `provider_for(platform)` / `publish_post(...)`. The one place
+  to register a new platform; Instagram should slot in here.
 
-## TODO — where to take this next
-
-1. `oauth.py`: per-platform authorization-code flow (Twitter/X, LinkedIn,
-   Discord all differ) and a place to keep the resulting tokens (env vars
-   are fine for a hackathon).
-2. `publish.py`: once auth exists, route `publish_post` by `platform` to the
-   real API for each, and let real failures (expired auth, rate limits,
-   platform outage) raise instead of always returning success — that also
-   means `orchestrator/routes.py`'s `/api/approve` handler will need a real
-   error path, not just the happy path it has today.
-3. `images.py`: swap the placeholder URL for a real image-gen call. If a
-   `Post` needs an `imageUrl` field once this is real, add it to
-   `/shared/types.ts` and `orchestrator/schemas.py` together (see
-   `/shared/README.md`).
+OAuth state is single-use with a 10-minute TTL, stored in
+`orchestrator/session.py` alongside the encrypted-at-rest-free tokens — this
+is a one-user hackathon session, not a credential vault.

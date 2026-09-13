@@ -1,7 +1,28 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent, KeyboardEvent, ReactNode, RefObject, SVGProps } from "react";
-import type { PlatformId, Post, Source, TemplateId } from "@shared/types";
-import { ApiError, approvePost, generatePosts, regeneratePost } from "./api";
+import type { ChangeEvent, KeyboardEvent, MouseEvent, ReactNode, RefObject, SVGProps } from "react";
+import type {
+  ImageRatio,
+  LinkedInStatus,
+  PlatformId,
+  Post,
+  Source,
+  TemplateId,
+} from "@shared/types";
+import {
+  ApiError,
+  addSource as addSourceApi,
+  approvePost,
+  clearReference as clearReferenceApi,
+  clearSession as clearSessionApi,
+  disconnectLinkedIn,
+  generateImage,
+  generatePosts,
+  getSession,
+  regeneratePost,
+  removeSource as removeSourceApi,
+  setReference as setReferenceApi,
+  setWatermark as setWatermarkApi,
+} from "./api";
 
 /* ------------------------------------------------------------------ */
 /* Icons — functional only (add, remove, send, check, refresh, panels) */
@@ -69,10 +90,21 @@ const SourceGlyph = (p: IconProps) => (
     <path d="M14 11a4 4 0 00-6-.5l-2 2a4 4 0 105.7 5.7l1.1-1.1" />
   </svg>
 );
+const LinkGlyph = (p: IconProps) => (
+  <svg {...svg} width="13" height="13" {...p}>
+    <path d="M10 13a4 4 0 006 .5l2-2a4 4 0 10-5.7-5.7" />
+    <path d="M14 11a4 4 0 00-6-.5l-2 2a4 4 0 105.7 5.7" />
+  </svg>
+);
 const WarningGlyph = (p: IconProps) => (
   <svg {...svg} width="18" height="18" {...p}>
     <path d="M12 3.5l9 15.5H3l9-15.5z" />
     <path d="M12 10v3.5M12 16.5h.01" />
+  </svg>
+);
+const TrashGlyph = (p: IconProps) => (
+  <svg {...svg} width="13" height="13" {...p}>
+    <path d="M4 7h16M10 7V5h4v2M6 7l1 13h10l1-13" />
   </svg>
 );
 
@@ -102,11 +134,15 @@ const TEMPLATES: { id: TemplateId; label: string }[] = [
   { id: "custom", label: "Custom" },
 ];
 
+/** Only LinkedIn is shown; Instagram is kept for when publishing lands. */
+const ACTIVE_PLATFORMS: PlatformId[] = ["linkedin"];
+
 const PLATFORMS: Record<PlatformId, { name: string; handle: string; mark: string; meta: string }> = {
-  twitter: { name: "Twitter", handle: "@acme", mark: "X", meta: "280 chars" },
-  linkedin: { name: "LinkedIn", handle: "Acme Inc.", mark: "in", meta: "long form" },
-  discord: { name: "Discord", handle: "#announcements", mark: "D", meta: "community" },
+  linkedin: { name: "LinkedIn", handle: "Personal profile", mark: "in", meta: "long form" },
+  instagram: { name: "Instagram", handle: "Business account", mark: "IG", meta: "caption" },
 };
+
+const RATIOS: ImageRatio[] = ["4:5", "1:1", "16:9"];
 
 /* ------------------------------------------------------------------ */
 /* Small primitives                                                    */
@@ -141,23 +177,6 @@ function IconButton({
   );
 }
 
-function ThumbPlaceholder({ posted }: { posted: boolean }) {
-  return (
-    <div
-      className={`grid h-20 w-20 shrink-0 place-items-center rounded-lg border text-ink-faint ${
-        posted ? "border-line bg-raised opacity-60" : "border-line bg-raised"
-      }`}
-      style={{
-        backgroundImage:
-          "repeating-linear-gradient(45deg, rgba(255,255,255,0.018) 0 6px, transparent 6px 12px)",
-      }}
-      aria-hidden="true"
-    >
-      <ImageGlyph />
-    </div>
-  );
-}
-
 function PlatformMark({ mark }: { mark: string }) {
   return (
     <span className="grid h-6 w-6 place-items-center rounded-md border border-line bg-raised text-[10px] font-medium tracking-tight text-ink-dim">
@@ -166,19 +185,168 @@ function PlatformMark({ mark }: { mark: string }) {
   );
 }
 
+function ConfirmDialog({
+  title,
+  body,
+  confirmLabel,
+  busy = false,
+  onConfirm,
+  onCancel,
+}: {
+  title: string;
+  body: ReactNode;
+  confirmLabel: string;
+  busy?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4"
+      onClick={onCancel}
+      role="presentation"
+    >
+      <div
+        className="w-full max-w-[440px] rounded-xl border border-line bg-raised p-5 shadow-2xl"
+        onClick={(e: MouseEvent) => e.stopPropagation()}
+      >
+        <h3 className="text-[15px] text-ink">{title}</h3>
+        <div className="mt-1.5 text-[13px] leading-relaxed text-ink-dim">{body}</div>
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-lg border border-line px-3 py-1.5 text-[13px] text-ink-dim transition-colors hover:border-line-strong hover:text-ink"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={busy}
+            className="flex items-center gap-1.5 rounded-lg border border-accent/40 bg-accent-soft px-3 py-1.5 text-[13px] text-accent transition-colors hover:border-accent/60 disabled:opacity-60"
+          >
+            {busy && <Spinner size={12} />}
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ReferenceControl({
+  referenceImage,
+  busy,
+  onPick,
+  onClear,
+}: {
+  referenceImage: string | null;
+  busy: boolean;
+  onPick: (file: File) => void;
+  onClear: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  return (
+    <div className="flex shrink-0 items-center gap-2">
+      {referenceImage ? (
+        <>
+          <img
+            src={referenceImage}
+            alt="Style reference"
+            title="Style reference — the agent copies this image's design"
+            className="h-8 w-8 rounded-md border border-line object-cover"
+          />
+          <span className="text-[11px] text-ink-faint">Style ref</span>
+          <button
+            type="button"
+            onClick={onClear}
+            aria-label="Remove style reference"
+            className="grid h-5 w-5 place-items-center rounded-md text-ink-faint transition hover:bg-canvas hover:text-ink-dim"
+          >
+            <Close width={11} height={11} />
+          </button>
+        </>
+      ) : (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => inputRef.current?.click()}
+          title="Upload a style reference — the agent copies its layout, palette and typography"
+          className="flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1 text-[11px] text-ink-dim transition-colors hover:border-line-strong hover:text-ink disabled:opacity-60"
+        >
+          {busy ? <Spinner size={12} /> : <ImageGlyph width={13} height={13} />}
+          Style ref
+        </button>
+      )}
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(e: ChangeEvent<HTMLInputElement>) => {
+          const file = e.target.files?.[0];
+          if (file) onPick(file);
+          e.target.value = "";
+        }}
+      />
+    </div>
+  );
+}
+
+function WatermarkControl({
+  value,
+  onSave,
+}: {
+  value: string;
+  onSave: (value: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+
+  const commit = () => {
+    const next = draft.trim();
+    if (next !== value) onSave(next);
+  };
+
+  return (
+    <input
+      value={draft}
+      onChange={(e: ChangeEvent<HTMLInputElement>) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+      }}
+      placeholder="@watermark"
+      title="Watermark drawn on generated images (leave empty for none)"
+      className="w-[110px] rounded-lg border border-line bg-raised px-2 py-1 text-[11px] text-ink outline-none transition-colors placeholder:text-ink-faint focus:border-line-strong"
+    />
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Sidebar — Sources                                                   */
 /* ------------------------------------------------------------------ */
 
 function SourceCard({ source, onRemove }: { source: Source; onRemove: (id: string) => void }) {
+  const failed = source.status === "error";
   return (
     <li className="group flex items-start gap-2.5 rounded-[10px] border border-line bg-raised px-2.5 py-2 transition-colors hover:border-line-strong">
-      <span className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md border border-line bg-canvas text-[10px] font-medium uppercase text-ink-dim">
+      <span
+        className={`mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md border text-[10px] font-medium uppercase ${
+          failed ? "border-error/40 bg-canvas text-error" : "border-line bg-canvas text-ink-dim"
+        }`}
+      >
         {source.host.replace(/^www\./, "").charAt(0)}
       </span>
       <div className="min-w-0 flex-1 leading-snug">
         <p className="truncate text-[13px] text-ink">{source.title}</p>
-        <p className="truncate text-[11px] text-ink-faint">{source.path}</p>
+        <p className={`truncate text-[11px] ${failed ? "text-error/80" : "text-ink-faint"}`}>
+          {failed ? source.error ?? "Could not fetch this source" : source.path}
+        </p>
+        {source.deep && !failed && (
+          <p className="mt-0.5 text-[10px] uppercase tracking-wide text-accent/80">deep context</p>
+        )}
       </div>
       <button
         type="button"
@@ -192,29 +360,36 @@ function SourceCard({ source, onRemove }: { source: Source; onRemove: (id: strin
   );
 }
 
+export type AddSourceResult = { ok: boolean; error?: string };
+
 function Sidebar({
   sources,
+  adding,
   onAdd,
   onRemove,
   onCollapse,
   inputRef,
 }: {
   sources: Source[];
-  onAdd: (raw: string) => boolean;
+  adding: boolean;
+  onAdd: (raw: string, deep: boolean) => Promise<AddSourceResult>;
   onRemove: (id: string) => void;
   onCollapse: () => void;
   inputRef: RefObject<HTMLInputElement>;
 }) {
   const [value, setValue] = useState("");
+  const [deep, setDeep] = useState(false);
   const [error, setError] = useState("");
 
-  const submit = () => {
-    const ok = onAdd(value);
-    if (ok) {
+  const submit = async () => {
+    const raw = value.trim();
+    if (!raw || adding) return;
+    const result = await onAdd(raw, deep);
+    if (result.ok) {
       setValue("");
       setError("");
     } else {
-      setError(value.trim() ? "That doesn't look like a URL." : "");
+      setError(result.error || "Couldn't add that source.");
     }
   };
 
@@ -232,7 +407,7 @@ function Sidebar({
 
       <div className="px-3 pb-3">
         <div className="flex items-center gap-1.5 rounded-[10px] border border-line bg-raised px-2.5 py-1.5 focus-within:border-line-strong">
-          <Plus className="shrink-0 text-ink-faint" />
+          {adding ? <Spinner size={13} /> : <Plus className="shrink-0 text-ink-faint" />}
           <input
             ref={inputRef}
             value={value}
@@ -241,22 +416,33 @@ function Sidebar({
               if (error) setError("");
             }}
             onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
-              if (e.key === "Enter") submit();
+              if (e.key === "Enter") void submit();
             }}
-            placeholder="Add source URL"
-            className="min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-faint"
+            placeholder={adding ? "Reading source…" : "Add source URL"}
+            disabled={adding}
+            className="min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-faint disabled:opacity-70"
           />
-          {value.trim() && (
+          {value.trim() && !adding && (
             <button
               type="button"
-              onClick={submit}
+              onClick={() => void submit()}
               className="shrink-0 rounded-md px-1.5 text-[11px] text-accent transition-colors hover:bg-accent-soft"
             >
               Add
             </button>
           )}
         </div>
-        {error && <p className="mt-1.5 px-1 text-[11px] text-ink-faint">{error}</p>}
+        <label className="mt-2 flex cursor-pointer items-center gap-1.5 px-1 text-[11px] text-ink-faint">
+          <input
+            type="checkbox"
+            checked={deep}
+            disabled={adding}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setDeep(e.target.checked)}
+            className="h-3 w-3 accent-[#d9a95c]"
+          />
+          Analyze page images too (slower)
+        </label>
+        {error && <p className="mt-1.5 px-1 text-[11px] text-error/90">{error}</p>}
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-4">
@@ -319,7 +505,7 @@ function SkeletonCard({ lines }: { lines: number }) {
         <div className="h-3 w-24 animate-pulse rounded bg-line" />
       </div>
       <div className="mt-4 flex gap-4">
-        <div className="h-20 w-20 shrink-0 animate-pulse rounded-lg bg-line" />
+        <div className="h-24 w-20 shrink-0 animate-pulse rounded-lg bg-line" />
         <div className="flex-1 space-y-2.5 pt-1">
           {Array.from({ length: lines }).map((_, i) => (
             <div
@@ -334,20 +520,51 @@ function SkeletonCard({ lines }: { lines: number }) {
   );
 }
 
-/** Post plus frontend-only view-state — variantIndex/loading never cross the wire. */
-type UIPost = Post & { variantIndex: number; loading: boolean };
+/** Post plus frontend-only view-state — `loading` never crosses the wire. */
+type UIPost = Post & { loading: boolean };
+
+function PostThumb({ post }: { post: UIPost }) {
+  if (post.imageUrl && post.imageStatus !== "generating") {
+    return (
+      <img
+        src={post.imageUrl}
+        alt={post.altText || post.headline || "Post image"}
+        className="h-24 w-20 shrink-0 rounded-lg border border-line object-cover"
+      />
+    );
+  }
+  return (
+    <div
+      className={`grid h-24 w-20 shrink-0 place-items-center rounded-lg border text-ink-faint ${
+        post.status === "posted" ? "border-line bg-raised opacity-60" : "border-line bg-raised"
+      }`}
+      style={{
+        backgroundImage:
+          "repeating-linear-gradient(45deg, rgba(255,255,255,0.018) 0 6px, transparent 6px 12px)",
+      }}
+      aria-hidden="true"
+    >
+      {post.imageStatus === "generating" ? <Spinner size={16} /> : <ImageGlyph />}
+    </div>
+  );
+}
 
 function PostCard({
   post,
   onApprove,
   onRegenerate,
+  onImage,
 }: {
   post: UIPost;
   onApprove: (id: string) => void;
   onRegenerate: (id: string) => void;
+  onImage: (id: string, ratio: ImageRatio, webSearch: boolean) => void;
 }) {
   const p = PLATFORMS[post.platform];
   const posted = post.status === "posted";
+  const [ratio, setRatio] = useState<ImageRatio>("4:5");
+  const [webBg, setWebBg] = useState(false);
+  const imaging = post.imageStatus === "generating";
 
   if (post.loading) return <SkeletonCard lines={3} />;
 
@@ -375,22 +592,79 @@ function PostCard({
       </header>
 
       <div className="mt-4 flex gap-4">
-        <ThumbPlaceholder posted={posted} />
-        <p
-          className={`min-w-0 flex-1 whitespace-pre-wrap text-[14px] leading-[1.75] ${
-            posted ? "text-ink-dim" : "text-ink"
-          }`}
-        >
-          {post.text}
-        </p>
+        <PostThumb post={post} />
+        <div className="min-w-0 flex-1">
+          {post.headline && (
+            <p className="mb-1 truncate text-[12px] font-medium uppercase tracking-wide text-accent/90">
+              {post.headline}
+            </p>
+          )}
+          <p
+            className={`min-w-0 whitespace-pre-wrap text-[14px] leading-[1.75] ${
+              posted ? "text-ink-dim" : "text-ink"
+            }`}
+          >
+            {post.text}
+          </p>
+          {post.hashtags.length > 0 && (
+            <p className="mt-2 text-[12px] text-ink-faint">
+              {post.hashtags.map((tag) => `#${tag}`).join(" ")}
+            </p>
+          )}
+          {post.imageError && (
+            <p className="mt-2 text-[11px] text-error/90">Image failed: {post.imageError}</p>
+          )}
+        </div>
       </div>
 
-      <footer className="mt-4 flex items-center justify-between border-t border-line pt-3">
+      <footer className="mt-4 flex items-center justify-between gap-3 border-t border-line pt-3">
         <span className="text-[11px] text-ink-faint">
           {posted ? "Published just now" : `Draft ${post.variantIndex + 1} · awaiting approval`}
         </span>
         {!posted && (
           <div className="flex items-center gap-2">
+            {imaging ? (
+              <span className="flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-faint">
+                <Spinner size={12} /> Imaging…
+              </span>
+            ) : (
+              <>
+                <select
+                  value={ratio}
+                  onChange={(e: ChangeEvent<HTMLSelectElement>) =>
+                    setRatio(e.target.value as ImageRatio)
+                  }
+                  title="Image ratio"
+                  className="rounded-lg border border-line bg-raised px-1.5 py-1 text-[11px] text-ink-dim outline-none transition-colors hover:border-line-strong"
+                >
+                  {RATIOS.map((r) => (
+                    <option key={r} value={r}>
+                      {r}
+                    </option>
+                  ))}
+                </select>
+                <label
+                  className="flex cursor-pointer items-center gap-1 text-[11px] text-ink-faint"
+                  title="Search the web for a real scene photo to guide the background"
+                >
+                  <input
+                    type="checkbox"
+                    checked={webBg}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setWebBg(e.target.checked)}
+                    className="h-3 w-3 accent-[#d9a95c]"
+                  />
+                  Web bg
+                </label>
+                <button
+                  type="button"
+                  onClick={() => onImage(post.id, ratio, webBg)}
+                  className="flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-dim transition-colors hover:border-line-strong hover:text-ink"
+                >
+                  <ImageGlyph width={13} height={13} />
+                  {post.imageUrl ? "New image" : "Add image"}
+                </button>
+              </>
+            )}
             <button
               type="button"
               onClick={() => onRegenerate(post.id)}
@@ -418,17 +692,17 @@ function EmptyState({ onAddSource }: { onAddSource: () => void }) {
       <span className="grid h-10 w-10 place-items-center rounded-xl border border-line bg-raised text-ink-faint">
         <SourceGlyph />
       </span>
-      <h3 className="mt-4 text-[15px] text-ink">Add a source to get started</h3>
+      <h3 className="mt-4 text-[15px] text-ink">Ground it with a source — or skip it</h3>
       <p className="mt-1.5 max-w-[380px] text-[13px] leading-relaxed text-ink-faint">
-        Paste one or more URLs in the left panel. Drafts are generated from what those pages say —
-        nothing is written from thin air.
+        Sources make drafts factual: paste one or more URLs in the left panel. Or just describe
+        what you want in the composer below and generate without any source.
       </p>
       <button
         type="button"
         onClick={onAddSource}
         className="mt-5 rounded-lg border border-accent/40 bg-accent-soft px-3 py-1.5 text-[13px] text-accent transition-colors hover:border-accent/60"
       >
-        Add your first source
+        Add a source
       </button>
     </div>
   );
@@ -439,7 +713,8 @@ function ReadyState() {
     <div className="flex h-full flex-col items-center justify-center px-6 text-center">
       <h3 className="text-[15px] text-ink">Ready when you are</h3>
       <p className="mt-1.5 max-w-[380px] text-[13px] leading-relaxed text-ink-faint">
-        Pick a template, add any extra direction below, and generate a draft for each platform.
+        Pick a template, add any extra direction below, and generate a LinkedIn draft. You can add
+        an image afterwards.
       </p>
     </div>
   );
@@ -535,78 +810,153 @@ function LogPanel({
 let uid = 0;
 const nextId = () => `id-${++uid}`;
 
-/** Pure, offline parse — mirrors backend/ingestion/fetch.py's parse_source()
- * fallback so the sidebar can show a card instantly, with no network call,
- * the moment a URL is added. The backend does its own (possibly better)
- * parse of the same URL when /api/generate actually fetches it. */
-function parseSource(raw: string): Source | null {
-  const trimmed = raw.trim();
-  if (!trimmed || /\s/.test(trimmed)) return null;
-  const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
-  let url: URL;
-  try {
-    url = new URL(withScheme);
-  } catch {
-    return null;
-  }
-  if (!url.hostname.includes(".")) return null;
-
-  const slug = url.pathname.split("/").filter(Boolean).pop();
-  const title = slug
-    ? slug.replace(/[-_]/g, " ").replace(/\.\w+$/, "").replace(/\b\w/g, (c) => c.toUpperCase())
-    : url.hostname.replace(/^www\./, "");
-
-  return {
-    id: nextId(),
-    url: url.toString(),
-    host: url.hostname,
-    title: title.length > 46 ? `${title.slice(0, 46)}…` : title,
-    path: url.hostname.replace(/^www\./, "") + (url.pathname === "/" ? "" : url.pathname),
-  };
-}
-
 const stamp = () =>
   new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
 type Phase = "idle" | "loading" | "preview" | "error";
 
 export default function App() {
+  const [booting, setBooting] = useState(true);
   const [sources, setSources] = useState<Source[]>([]);
+  const [addingSource, setAddingSource] = useState(false);
   const [template, setTemplate] = useState<TemplateId>("launch");
   const [customTemplate, setCustomTemplate] = useState("");
   const [prompt, setPrompt] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
   const [posts, setPosts] = useState<UIPost[]>([]);
+  const [linkedin, setLinkedin] = useState<LinkedInStatus>({
+    connected: false,
+    status: "disconnected",
+  });
+  const [referenceImage, setReferenceImage] = useState<string | null>(null);
+  const [referenceBusy, setReferenceBusy] = useState(false);
+  const [watermark, setWatermark] = useState("");
   const [log, setLog] = useState<LogEntry[]>([]);
   const [errorMessage, setErrorMessage] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [logOpen, setLogOpen] = useState(true);
+  const [confirmPost, setConfirmPost] = useState<UIPost | null>(null);
+  const [publishing, setPublishing] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
 
-  const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const addInputRef = useRef<HTMLInputElement>(null);
-
-  const clearTimers = () => {
-    timers.current.forEach(clearTimeout);
-    timers.current = [];
-  };
-  useEffect(() => clearTimers, []);
 
   const pushLog = useCallback((text: string, tone: LogTone = "default") => {
     setLog((prev) => [...prev, { id: nextId(), text, tone, time: stamp() }]);
   }, []);
 
-  const addSource = (raw: string): boolean => {
-    const parsed = parseSource(raw);
-    if (!parsed) return false;
-    setSources((prev) => [...prev, parsed]);
-    pushLog(`+ source ${parsed.path}`, "dim");
-    return true;
+  /* Rehydrate from the backend's single session and consume any OAuth
+     callback query params (?connected=linkedin / ?error=...). */
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const connected = params.get("connected");
+    const oauthError = params.get("error");
+    if (connected || oauthError) {
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+    if (connected === "linkedin") pushLog("LinkedIn connected", "ok");
+    else if (connected) pushLog(`Connected ${connected}`, "ok");
+    if (oauthError) pushLog(`OAuth failed: ${oauthError}`, "error");
+
+    void (async () => {
+      try {
+        const data = await getSession();
+        setSources(data.sources);
+        setPosts(data.posts.map((post) => ({ ...post, loading: false })));
+        setLinkedin(data.linkedin);
+        setReferenceImage(data.referenceImage ?? null);
+        setWatermark(data.watermark ?? "");
+        if (data.posts.length > 0) setPhase("preview");
+      } catch (err) {
+        const message = err instanceof ApiError ? err.message : "Could not load the session.";
+        pushLog(`Session load failed: ${message}`, "error");
+      } finally {
+        setBooting(false);
+      }
+    })();
+  }, [pushLog]);
+
+  const addSource = async (raw: string, deep: boolean): Promise<AddSourceResult> => {
+    setAddingSource(true);
+    pushLog(`Fetching ${raw.slice(0, 60)}${deep ? " (deep analysis)" : ""}…`, "dim");
+    try {
+      const { source } = await addSourceApi({ url: raw, deep });
+      setSources((prev) => [...prev, source]);
+      if (source.status === "error") {
+        pushLog(`Source failed: ${source.error ?? "unknown error"}`, "error");
+        return { ok: true, error: source.error ?? undefined };
+      }
+      pushLog(`+ ${source.host} · ${source.title}`, "dim");
+      return { ok: true };
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : "Could not add that source.";
+      pushLog(`Source rejected: ${message}`, "error");
+      return { ok: false, error: message };
+    } finally {
+      setAddingSource(false);
+    }
   };
 
-  const removeSource = (id: string) => {
+  const removeSource = async (id: string) => {
     const gone = sources.find((s) => s.id === id);
-    if (gone) pushLog(`- source ${gone.path}`, "dim");
     setSources((prev) => prev.filter((s) => s.id !== id));
+    try {
+      await removeSourceApi(id);
+      if (gone) pushLog(`- ${gone.path}`, "dim");
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : "Could not remove that source.";
+      pushLog(`Remove failed: ${message}`, "error");
+    }
+  };
+
+  const uploadReference = (file: File) => {
+    if (file.size > 12 * 1024 * 1024) {
+      pushLog("Reference image is larger than 12 MB", "error");
+      return;
+    }
+    setReferenceBusy(true);
+    const reader = new FileReader();
+    reader.onerror = () => {
+      pushLog("Could not read the reference image", "error");
+      setReferenceBusy(false);
+    };
+    reader.onload = async () => {
+      try {
+        const { referenceImage: url } = await setReferenceApi({
+          dataUrl: String(reader.result),
+        });
+        setReferenceImage(url ?? null);
+        pushLog("Style reference set — generate or regenerate to apply its style", "accent");
+      } catch (err) {
+        const message = err instanceof ApiError ? err.message : "Could not set the reference.";
+        pushLog(`Reference failed: ${message}`, "error");
+      } finally {
+        setReferenceBusy(false);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const removeReference = async () => {
+    try {
+      await clearReferenceApi();
+      setReferenceImage(null);
+      pushLog("Style reference removed", "dim");
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : "Could not clear the reference.";
+      pushLog(message, "error");
+    }
+  };
+
+  const saveWatermark = async (value: string) => {
+    try {
+      const result = await setWatermarkApi({ watermark: value });
+      setWatermark(result.watermark ?? "");
+      pushLog(value ? `Watermark: ${value}` : "Watermark disabled", "dim");
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : "Could not save the watermark.";
+      pushLog(message, "error");
+    }
   };
 
   const templateLabel = useMemo(
@@ -615,49 +965,28 @@ export default function App() {
   );
 
   const generate = async () => {
-    if (sources.length === 0 || phase === "loading") return;
-    clearTimers();
-    setPosts([]);
+    if (phase === "loading") return;
     setErrorMessage("");
     setPhase("loading");
-
-    // Lines we already know client-side play immediately while the real
-    // request is in flight; anything that depends on the actual response
-    // (which platforms came back, how many) plays after it resolves.
-    const knownSteps: { text: string; tone: LogTone }[] = [
-      ...sources.map(
-        (s, i): { text: string; tone: LogTone } => ({
-          text: `Fetching source ${i + 1}/${sources.length}… ${s.host}`,
-          tone: "dim",
-        })
-      ),
-      { text: `Applying template: ${templateLabel}`, tone: "default" },
-      ...(prompt.trim()
-        ? [{ text: `Steering: "${prompt.trim().slice(0, 44)}"`, tone: "dim" as LogTone }]
-        : []),
-      { text: "Talking to generation service…", tone: "default" },
-    ];
-    knownSteps.forEach((step, i) => {
-      timers.current.push(setTimeout(() => pushLog(step.text, step.tone), 200 + i * 260));
-    });
+    pushLog(`Applying template: ${templateLabel}`, "default");
+    if (prompt.trim()) pushLog(`Steering: "${prompt.trim().slice(0, 44)}"`, "dim");
+    pushLog("Talking to the generation service…", "default");
 
     try {
       const { bundle } = await generatePosts({
-        sources: sources.map((s) => ({ url: s.url })),
         templateId: template,
         customTemplate: template === "custom" ? customTemplate : undefined,
         prompt: prompt.trim() || undefined,
       });
-
-      clearTimers();
       bundle.posts.forEach((post) => {
-        pushLog(`Generating ${PLATFORMS[post.platform].name} variant…`, "default");
+        if (ACTIVE_PLATFORMS.includes(post.platform)) {
+          pushLog(`${PLATFORMS[post.platform].name} draft ready`, "default");
+        }
       });
-      pushLog(`${bundle.posts.length} drafts ready — awaiting approval`, "accent");
-      setPosts(bundle.posts.map((post) => ({ ...post, variantIndex: 0, loading: false })));
+      pushLog(`${bundle.posts.length} draft(s) — review, then approve to publish`, "accent");
+      setPosts(bundle.posts.map((post) => ({ ...post, loading: false })));
       setPhase("preview");
     } catch (err) {
-      clearTimers();
       const message =
         err instanceof ApiError ? err.message : "Something went wrong generating drafts.";
       pushLog(`Generation failed: ${message}`, "error");
@@ -666,46 +995,116 @@ export default function App() {
     }
   };
 
-  /* keep log writes outside the state updater — updaters must stay pure */
-  const approve = async (id: string) => {
-    const target = posts.find((p) => p.id === id);
-    if (!target || target.status === "posted") return;
-    try {
-      const { post } = await approvePost({
-        postId: target.id,
-        platform: target.platform,
-        text: target.text,
-      });
-      pushLog(`Posted to ${PLATFORMS[target.platform].name} ✓`, "ok");
-      setPosts((prev) => prev.map((p) => (p.id === id ? { ...p, status: post.status } : p)));
-    } catch (err) {
-      const message = err instanceof ApiError ? err.message : "Approve failed.";
-      pushLog(`Approve failed for ${PLATFORMS[target.platform].name}: ${message}`, "error");
-    }
-  };
-
   const regenerate = async (id: string) => {
     const target = posts.find((p) => p.id === id);
     if (!target) return;
-    pushLog(`Regenerating ${PLATFORMS[target.platform].name} variant…`, "default");
+    pushLog(`Regenerating ${PLATFORMS[target.platform].name} draft…`, "default");
     setPosts((prev) => prev.map((p) => (p.id === id ? { ...p, loading: true } : p)));
 
     try {
-      const { post, variantIndex } = await regeneratePost({
-        postId: target.id,
-        platform: target.platform,
-        templateId: template,
-        customTemplate: template === "custom" ? customTemplate : undefined,
-        variantIndex: target.variantIndex,
-      });
+      const { post } = await regeneratePost({ postId: id });
       setPosts((prev) =>
-        prev.map((p) => (p.id === id ? { ...p, text: post.text, variantIndex, loading: false } : p))
+        prev.map((p) => (p.id === id ? { ...post, loading: false } : p))
       );
-      pushLog(`${PLATFORMS[target.platform].name} draft updated`, "dim");
+      pushLog(`${PLATFORMS[post.platform].name} draft updated`, "dim");
     } catch (err) {
       const message = err instanceof ApiError ? err.message : "Regenerate failed.";
       setPosts((prev) => prev.map((p) => (p.id === id ? { ...p, loading: false } : p)));
-      pushLog(`Regenerate failed for ${PLATFORMS[target.platform].name}: ${message}`, "error");
+      pushLog(`Regenerate failed: ${message}`, "error");
+    }
+  };
+
+  const makeImage = async (id: string, ratio: ImageRatio, webSearch: boolean) => {
+    const target = posts.find((p) => p.id === id);
+    if (!target) return;
+    const mode = referenceImage ? "reference-styled " : "";
+    pushLog(
+      `Generating ${mode}${ratio} image for ${PLATFORMS[target.platform].name}…`,
+      "default"
+    );
+    setPosts((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, imageStatus: "generating", imageError: null } : p))
+    );
+    try {
+      const { post, webImage } = await generateImage({ postId: id, ratio, webSearch });
+      setPosts((prev) => prev.map((p) => (p.id === id ? { ...post, loading: false } : p)));
+      if (webImage) {
+        pushLog(`Web background: ${webImage.description || webImage.query}`, "dim");
+      }
+      pushLog("Image ready — attached when you approve", "accent");
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : "Image generation failed.";
+      setPosts((prev) =>
+        prev.map((p) =>
+          p.id === id ? { ...p, imageStatus: "error", imageError: message } : p
+        )
+      );
+      pushLog(`Image failed: ${message}`, "error");
+    }
+  };
+
+  const requestApprove = (id: string) => {
+    const target = posts.find((p) => p.id === id);
+    if (target && target.status !== "posted") setConfirmPost(target);
+  };
+
+  const doApprove = async () => {
+    const target = confirmPost;
+    if (!target) return;
+    setPublishing(true);
+    try {
+      const { post, providerPostId } = await approvePost({ postId: target.id });
+      setPosts((prev) => prev.map((p) => (p.id === target.id ? { ...post, loading: false } : p)));
+      pushLog(
+        `Posted to LinkedIn ✓${providerPostId ? ` (${providerPostId})` : ""}`,
+        "ok"
+      );
+      setConfirmPost(null);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409 && err.connectUrl) {
+        pushLog("LinkedIn isn't connected — opening the authorization flow…", "error");
+        window.location.href = err.connectUrl;
+        return;
+      }
+      const message = err instanceof ApiError ? err.message : "Approve failed.";
+      pushLog(`Publish failed: ${message}`, "error");
+    } finally {
+      setPublishing(false);
+    }
+  };
+
+  const connectLinkedIn = () => {
+    pushLog("Redirecting to LinkedIn…", "dim");
+    window.location.href = "/api/oauth/linkedin/connect";
+  };
+
+  const disconnect = async () => {
+    try {
+      await disconnectLinkedIn();
+      setLinkedin({ connected: false, status: "disconnected" });
+      pushLog("LinkedIn disconnected", "dim");
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : "Disconnect failed.";
+      pushLog(message, "error");
+    }
+  };
+
+  const clearSession = async () => {
+    try {
+      await clearSessionApi();
+      setSources([]);
+      setPosts([]);
+      setPhase("idle");
+      setErrorMessage("");
+      setLinkedin({ connected: false, status: "disconnected" });
+      setReferenceImage(null);
+      setWatermark("");
+      pushLog("Session cleared", "accent");
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : "Clear failed.";
+      pushLog(message, "error");
+    } finally {
+      setConfirmClear(false);
     }
   };
 
@@ -716,11 +1115,22 @@ export default function App() {
 
   const hasSources = sources.length > 0;
 
+  if (booting) {
+    return (
+      <div className="grid h-full place-items-center bg-canvas text-ink-faint">
+        <span className="flex items-center gap-2 text-[13px]">
+          <Spinner size={15} /> Loading session…
+        </span>
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-full bg-canvas text-ink">
       {sidebarOpen ? (
         <Sidebar
           sources={sources}
+          adding={addingSource}
           onAdd={addSource}
           onRemove={removeSource}
           onCollapse={() => setSidebarOpen(false)}
@@ -748,16 +1158,59 @@ export default function App() {
                 : "no sources"}
             </span>
           </div>
-          {!logOpen && (
-            <IconButton label="Show activity panel" onClick={() => setLogOpen(true)}>
-              <PanelRight />
-            </IconButton>
-          )}
+          <div className="flex items-center gap-2">
+            {linkedin.connected ? (
+              <span className="flex items-center gap-2 rounded-full border border-ok/25 px-2.5 py-0.5 text-[11px] text-ok">
+                <span className="h-1.5 w-1.5 rounded-full bg-ok" />
+                {linkedin.displayName || "LinkedIn connected"}
+                <button
+                  type="button"
+                  onClick={() => void disconnect()}
+                  className="text-ink-faint transition-colors hover:text-ink"
+                  title="Disconnect LinkedIn"
+                >
+                  <Close width={11} height={11} />
+                </button>
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={connectLinkedIn}
+                className="flex items-center gap-1.5 rounded-lg border border-accent/40 bg-accent-soft px-2.5 py-1 text-[12px] text-accent transition-colors hover:border-accent/60"
+              >
+                <LinkGlyph /> Connect LinkedIn
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setConfirmClear(true)}
+              className="flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-dim transition-colors hover:border-line-strong hover:text-ink"
+              title="Clear the session (sources, drafts, images, LinkedIn)"
+            >
+              <TrashGlyph /> Clear session
+            </button>
+            {!logOpen && (
+              <IconButton label="Show activity panel" onClick={() => setLogOpen(true)}>
+                <PanelRight />
+              </IconButton>
+            )}
+          </div>
         </header>
 
         <div className="shrink-0 border-b border-line px-5 py-3">
           <div className="mx-auto w-full max-w-[680px]">
-            <TemplateTabs value={template} onChange={setTemplate} />
+            <div className="flex items-center justify-between gap-3">
+              <TemplateTabs value={template} onChange={setTemplate} />
+              <div className="flex shrink-0 items-center gap-3">
+                <WatermarkControl value={watermark} onSave={(v) => void saveWatermark(v)} />
+                <ReferenceControl
+                  referenceImage={referenceImage}
+                  busy={referenceBusy}
+                  onPick={uploadReference}
+                  onClear={() => void removeReference()}
+                />
+              </div>
+            </div>
             {template === "custom" && (
               <textarea
                 value={customTemplate}
@@ -776,7 +1229,7 @@ export default function App() {
           <div className="mx-auto w-full max-w-[680px] px-5 py-6">
             {phase === "error" ? (
               <div className="h-[60vh]">
-                <ErrorState message={errorMessage} onRetry={generate} />
+                <ErrorState message={errorMessage} onRetry={() => void generate()} />
               </div>
             ) : !hasSources && phase !== "loading" && posts.length === 0 ? (
               <div className="h-[60vh]">
@@ -800,7 +1253,13 @@ export default function App() {
             ) : (
               <div className="flex flex-col gap-4">
                 {posts.map((p) => (
-                  <PostCard key={p.id} post={p} onApprove={approve} onRegenerate={regenerate} />
+                  <PostCard
+                    key={p.id}
+                    post={p}
+                    onApprove={requestApprove}
+                    onRegenerate={(id) => void regenerate(id)}
+                    onImage={(id, ratio, webSearch) => void makeImage(id, ratio, webSearch)}
+                  />
                 ))}
               </div>
             )}
@@ -822,16 +1281,16 @@ export default function App() {
                 placeholder={
                   hasSources
                     ? "Add direction — tone, audience, what to emphasize…"
-                    : "Add a source first"
+                    : "Describe what to post about — sources are optional…"
                 }
                 className="min-w-0 flex-1 bg-transparent text-[14px] text-ink outline-none placeholder:text-ink-faint"
               />
               <button
                 type="button"
                 onClick={() => void generate()}
-                disabled={!hasSources || phase === "loading"}
+                disabled={phase === "loading"}
                 className={`flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[13px] transition-colors ${
-                  !hasSources || phase === "loading"
+                  phase === "loading"
                     ? "cursor-not-allowed border-line text-ink-faint"
                     : "border-accent/40 bg-accent-soft text-accent hover:border-accent/60"
                 }`}
@@ -845,7 +1304,9 @@ export default function App() {
               </button>
             </div>
             <p className="mt-2 px-1 text-[11px] text-ink-faint">
-              Drafts are previews. Nothing publishes until you approve each card.
+              Drafts are previews. You approve each card before anything publishes — images are
+              optional. Add a style reference (top right) to copy a design, or tick “Web bg” on a
+              card to ground the background in a real photo.
             </p>
           </div>
         </div>
@@ -853,6 +1314,34 @@ export default function App() {
 
       {logOpen && (
         <LogPanel entries={log} running={phase === "loading"} onCollapse={() => setLogOpen(false)} />
+      )}
+
+      {confirmPost && (
+        <ConfirmDialog
+          title="Publish this draft to LinkedIn?"
+          body={
+            <>
+              It will be posted as{" "}
+              <span className="text-ink">{linkedin.displayName || "your profile"}</span>
+              {confirmPost.imageUrl ? " with the generated image attached" : " as text only"}. This
+              cannot be undone from here.
+            </>
+          }
+          confirmLabel="Publish now"
+          busy={publishing}
+          onConfirm={() => void doApprove()}
+          onCancel={() => setConfirmPost(null)}
+        />
+      )}
+
+      {confirmClear && (
+        <ConfirmDialog
+          title="Clear the session?"
+          body="Sources, drafts, generated images and the LinkedIn connection are all forgotten. There is no database, so this cannot be undone."
+          confirmLabel="Clear everything"
+          onConfirm={() => void clearSession()}
+          onCancel={() => setConfirmClear(false)}
+        />
       )}
     </div>
   );

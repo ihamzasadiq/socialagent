@@ -1,40 +1,52 @@
 # backend/orchestrator
 
-Ties `ingestion` → `templates` → `distribution` together and exposes them as
-HTTP endpoints for the frontend. This is the one module both Dev A and Dev B
-will touch — everyone else's work is isolated to their own folder.
+Ties ingestion -> templates -> imaging -> distribution together and exposes
+them over HTTP.
 
-- `main.py` — FastAPI app, CORS, mounts the router, `GET /health`
-- `routes.py` — `POST /api/generate`, `POST /api/regenerate`, `POST /api/approve`
-- `schemas.py` — Pydantic mirror of `/shared/types.ts` (camelCase on the wire —
-  see the field-mapping table at the top of that file)
-- `state.py` — `new_id()`/`utcnow_iso()` only. **Not** a persistence layer —
-  see below.
+- `main.py` — FastAPI app, CORS fallback, `/health`, `/media` static mount
+- `routes.py` — the API (below) plus the LinkedIn OAuth callback
+- `schemas.py` — Pydantic mirror of `/shared/types.ts` (camelCase on the wire)
+- `session.py` — the single in-memory `session` object plus `new_id`/`utcnow`
+  helpers. **No database.** `session.reset()` (exposed as
+  `POST /api/session/clear`) empties sources/posts/LinkedIn and deletes the
+  session's media directory.
 
-## Run it
+## Endpoints
 
-From the `backend/` directory specifically (not repo root, not this folder):
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/health` | liveness |
+| GET | `/api/session` | rehydrate the UI: sources, posts, LinkedIn status |
+| POST | `/api/session/clear` | wipe everything (incl. LinkedIn connection) |
+| POST | `/api/sources` | add + ingest a URL (`{url, deep?}`) |
+| DELETE | `/api/sources/{id}` | remove a source |
+| POST | `/api/reference` | store a style-reference image (`{dataUrl}`) |
+| DELETE | `/api/reference` | remove the style reference |
+| POST | `/api/generate` | generate drafts from session sources (uses the reference when set) |
+| POST | `/api/regenerate` | new variant for one post |
+| POST | `/api/image` | generate + compose a post image (`{postId, ratio?, style?, imagePrompt?, webSearch?}`) |
+| POST | `/api/approve` | publish to LinkedIn (409 + `connectUrl` when not connected) |
+| GET | `/api/oauth/linkedin/connect` | redirect to LinkedIn consent |
+| GET | `/api/oauth/linkedin/status` | connection status |
+| POST | `/api/oauth/linkedin/disconnect` | revoke + forget |
+| GET | `/oauth/callback/linkedin` | OAuth redirect target (tunnel-facing, no `/api`) |
+
+## Run
+
+From `backend/` specifically — sibling packages (`ingestion.fetch`,
+`templates.generate`, ...) need `backend/` on `sys.path`, and the bare
+`uvicorn` script doesn't reliably do that:
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+cd backend
 python -m uvicorn orchestrator.main:app --reload --port 8000
 ```
 
-`routes.py` imports sibling packages (`from ingestion.fetch import ...`, etc.),
-so `backend/` needs to be on `sys.path`. The bare `uvicorn` console script
-doesn't reliably put the current directory there — `python -m uvicorn` does.
-Running from the wrong directory gets you `ModuleNotFoundError: No module
-named 'ingestion'`.
+Interactive API docs are at `http://localhost:8000/docs`.
 
-Interactive API docs (auto-generated from `schemas.py`) at
-`http://localhost:8000/docs` once it's running.
+## Why no database
 
-## Why stateless
-
-No database, no in-memory store keyed by post id. `postId` is only ever
-echoed back in a response so the frontend can match it to the right card —
-the backend never needs to look anything up. The frontend keeps owning
-`posts`/`sources` in its own React state, same as before this backend
-existed, just populated from real responses now. For a hackathon stub this
-is the right tradeoff: nothing here needs a persistence layer to work.
+This is a one-user demo: sources, drafts, generated media and the LinkedIn
+token all belong to a single session, and "Clear session" is a feature rather
+than a cleanup chore. Keeping state in process memory means no migrations, no
+ORM and no token encryption — restarting the backend starts fresh.

@@ -14,11 +14,15 @@ export default defineConfig({
     },
   },
   server: {
-    // Forwards /api/* to the FastAPI backend in dev so the browser never
-    // has to deal with CORS (see backend/orchestrator/main.py for the
-    // CORSMiddleware fallback used when this proxy isn't in play).
+    // Forwards /api, /media and /health to the FastAPI backend in dev so the
+    // browser never has to deal with CORS (see backend/orchestrator/main.py
+    // for the CORSMiddleware fallback used when this proxy isn't in play).
+    // /oauth/callback is NOT proxied on purpose: LinkedIn hits the backend
+    // through the public tunnel, and the backend redirects back to the
+    // frontend's FRONTEND_SUCCESS_URL.
     proxy: {
       "/api": "http://localhost:8000",
+      "/media": "http://localhost:8000",
       "/health": "http://localhost:8000",
     },
   },

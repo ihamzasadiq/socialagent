@@ -20,7 +20,11 @@ it any time the two might drift.
 ## What's in here vs. what isn't
 
 `types.ts` only holds the *wire* shapes — what actually crosses the network.
-Frontend-only view-state (e.g. a post's `variantIndex` while regenerating,
-or a `loading` flag on a card) is **not** here; it's layered on top locally
-in `frontend/src/App.tsx`. Keeping those out of `Post` means the backend
-never has to know about UI concerns it doesn't own.
+Frontend-only view-state (e.g. the `loading` flag on a card) is **not** here;
+it's layered on top locally in `frontend/src/App.tsx`.
+
+Since the backend now owns the single session, most per-resource state is
+server-owned and comes back over the wire: `Source.status` (ingested or
+failed), `Post.variantIndex` (the regenerate rotation) and `Post.imageUrl` /
+`Post.imageStatus` (the generated image). The frontend rehydrates all of it
+from `GET /api/session`.

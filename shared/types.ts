@@ -10,36 +10,65 @@
  * backend's Pydantic models translate to/from snake_case internally via an
  * alias generator, so Python code stays idiomatic without breaking the wire
  * format.
+ *
+ * There is no database. The backend keeps ONE in-memory session (sources,
+ * posts, generated media, LinkedIn connection). The frontend rehydrates from
+ * GET /api/session on load and can wipe everything with POST /api/session/clear.
  */
 
-export type PlatformId = "twitter" | "linkedin" | "discord";
+/**
+ * Only LinkedIn is fully wired today; Instagram is generated-when-enabled but
+ * has no publish path yet, so the UI only shows LinkedIn.
+ */
+export type PlatformId = "linkedin" | "instagram";
 
 export type TemplateId = "funding" | "acquisition" | "launch" | "custom";
 
 export type PostStatus = "preview" | "posted";
 
-/** A source URL, parsed into something a template can reference. */
+export type SourceStatus = "loading" | "ready" | "error";
+
+export type ImageStatus = "none" | "generating" | "ready" | "error";
+
+export type ImageRatio = "1:1" | "4:5" | "16:9";
+
+export type ImageStyle = "modern" | "editorial" | "minimal";
+
+/** A source URL plus the context extracted from it. */
 export interface Source {
   id: string;
   url: string;
   host: string;
   title: string;
   path: string;
+  status: SourceStatus;
+  error?: string | null;
+  /** True once the optional vision pass has described the page images. */
+  deep: boolean;
 }
 
 /**
- * A single platform's draft. Deliberately minimal — `variantIndex` and
- * `loading` are frontend view-state, not part of this resource; the
- * frontend layers those on top locally (see UIPost in frontend/src/App.tsx).
+ * A single platform's draft. `variantIndex` is server-owned (the session
+ * remembers where in the variant rotation each post is). `imageUrl` points at
+ * the backend's /media mount once an image has been generated.
  */
 export interface Post {
   id: string;
   platform: PlatformId;
   text: string;
   status: PostStatus;
+  headline: string;
+  subhead: string;
+  hashtags: string[];
+  altText: string;
+  imagePrompt: string;
+  imageUrl?: string | null;
+  imageStatus: ImageStatus;
+  imageError?: string | null;
+  variantIndex: number;
 }
 
-/** The result of one generation pass: one Post per platform. */
+/** The result of one generation pass. */
 export interface PostBundle {
   id: string;
   templateId: TemplateId;
@@ -47,8 +76,25 @@ export interface PostBundle {
   createdAt: string; // ISO 8601
 }
 
+/* -------------------------------- sources -------------------------------- */
+
+export interface AddSourceRequest {
+  url: string;
+  /** Run the slower OpenRouter vision pass over the page's images. */
+  deep?: boolean;
+}
+
+export interface AddSourceResponse {
+  source: Source;
+}
+
+export interface OkResponse {
+  ok: boolean;
+}
+
+/* ------------------------------- generation ------------------------------ */
+
 export interface GenerateRequest {
-  sources: { url: string }[];
   templateId: TemplateId;
   /** Only meaningful when templateId === "custom". */
   customTemplate?: string;
@@ -62,32 +108,97 @@ export interface GenerateResponse {
 
 export interface RegenerateRequest {
   postId: string;
-  platform: PlatformId;
-  templateId: TemplateId;
-  customTemplate?: string;
-  /** The client's CURRENT variant index — input only, not stored server-side. */
-  variantIndex: number;
 }
 
 export interface RegenerateResponse {
   post: Post;
-  /** The new index; the client persists it locally. */
-  variantIndex: number;
 }
+
+/* --------------------------------- images -------------------------------- */
+
+export interface ImageRequest {
+  postId: string;
+  ratio?: ImageRatio;
+  style?: ImageStyle;
+  /** Override the LLM's suggested background prompt. */
+  imagePrompt?: string;
+  /** Search the web (Tavily) for a real scene photo to guide the background. */
+  webSearch?: boolean;
+}
+
+/** Info about a web image found by the Tavily scene search. */
+export interface WebImageInfo {
+  query: string;
+  url?: string | null;
+  description?: string | null;
+  /** /media path of the downloaded scene photo. */
+  local?: string | null;
+}
+
+export interface ImageResponse {
+  post: Post;
+  webImage?: WebImageInfo | null;
+}
+
+/* ------------------------------- reference ------------------------------- */
+
+export interface ReferenceRequest {
+  /** A base64 `data:image/...` URL read from the uploaded file. */
+  dataUrl: string;
+}
+
+export interface ReferenceResponse {
+  referenceImage?: string | null;
+}
+
+/* ------------------------------- watermark ------------------------------- */
+
+export interface WatermarkRequest {
+  /** Empty string = no watermark; null = fall back to brand.json. */
+  watermark?: string | null;
+}
+
+export interface WatermarkResponse {
+  watermark?: string | null;
+}
+
+/* -------------------------------- approve -------------------------------- */
 
 export interface ApproveRequest {
   postId: string;
-  platform: PlatformId;
-  /**
-   * The backend is stateless (see PostBundle discussion in shared/README.md)
-   * and never stored this post's text, so the client sends it along with
-   * the approval so the response's `post.text` can echo the real thing
-   * instead of coming back blank.
-   */
-  text: string;
 }
 
 export interface ApproveResponse {
   post: Post;
   postedAt: string; // ISO 8601
+  providerPostId?: string | null;
+}
+
+/* ------------------------------ session/auth ----------------------------- */
+
+export interface LinkedInStatus {
+  connected: boolean;
+  status: "connected" | "expiring" | "expired" | "needs_reauth" | "disconnected";
+  displayName?: string | null;
+  expiresAt?: string | null;
+}
+
+export interface SessionResponse {
+  sources: Source[];
+  posts: Post[];
+  linkedin: LinkedInStatus;
+  /** /media path of the uploaded style reference, if any. */
+  referenceImage?: string | null;
+  /** Watermark drawn on generated images; "" = none, null = brand default. */
+  watermark?: string | null;
+}
+
+export interface ClearSessionResponse {
+  ok: boolean;
+}
+
+export interface ProviderErrorResponse {
+  detail: string;
+  /** Present on a 409 from /api/approve: send the browser here to connect. */
+  connectUrl?: string;
 }
